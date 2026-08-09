@@ -2,6 +2,7 @@ require('dotenv').config({ path: '.env.local' });
 const { google } = require('googleapis');
 const admin = require('firebase-admin');
 const { FieldValue } = require('firebase-admin/firestore');
+const { GoogleGenerativeAI } = require('@google/generative-ai'); // Thêm thư viện SDK
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const tesseract = require('tesseract.js');
@@ -18,32 +19,22 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// Khởi tạo Google Drive API
+// Khởi tạo Google Drive & Gemini API SDK
 const auth = new google.auth.GoogleAuth({
   keyFile: process.env.GOOGLE_DRIVE_CREDENTIALS_PATH,
   scopes: ['https://www.googleapis.com/auth/drive.readonly'],
 });
 const drive = google.drive({ version: 'v3', auth });
 
-// Hàm gọi API tạo Embedding của Gemini
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Hàm tạo Embedding an toàn qua SDK
 async function getEmbedding(text) {
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${process.env.GEMINI_API_KEY}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: 'models/text-embedding-004',
-      content: {
-        parts: [{ text: text }]
-      }
-    })
-  });
-  const data = await response.json();
-  return data.embedding.values;
+  const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
+  const result = await embeddingModel.embedContent(text);
+  return result.embedding.values;
 }
 
-// Hàm chia nhỏ văn bản (Chunking)
 function chunkText(text, maxChars = 1000) {
   const chunks = [];
   let currentChunk = '';
@@ -61,7 +52,6 @@ function chunkText(text, maxChars = 1000) {
   return chunks;
 }
 
-// Hàm chính xử lý Google Drive
 async function processDriveFolder(folderId) {
   try {
     console.log(`Đang lấy danh sách file từ thư mục ${folderId}...`);
@@ -112,7 +102,7 @@ async function processDriveFolder(folderId) {
         continue;
       }
 
-      // Lưu Metadata vào bảng documents trong Firestore
+      // Lưu Document Metadata
       const docRef = db.collection('documents').doc();
       await docRef.set({
         file_name: file.name,
@@ -121,7 +111,7 @@ async function processDriveFolder(folderId) {
       });
 
       const chunks = chunkText(extractedText);
-      console.log(`Đã chia thành ${chunks.length} chunks. Đang tạo vector bằng Gemini và lưu vào Firestore...`);
+      console.log(`Đã chia thành ${chunks.length} chunks. Đang tạo vector bằng Gemini...`);
 
       let batch = db.batch();
       let batchCount = 0;
@@ -149,12 +139,11 @@ async function processDriveFolder(folderId) {
       console.log(`Hoàn tất file: ${file.name}`);
     }
     
-    console.log('\nQUÁ TRÌNH DOCUMENT WORKER HOÀN TẤT.');
+    console.log('\nQUÁ TRÌNH HOÀN TẤT.');
   } catch (error) {
     console.error('Lỗi quá trình Worker:', error);
   }
 }
 
-// Thay thế ID thư mục Google Drive
 const TARGET_FOLDER_ID = 'NHAP_ID_THU_MUC_CUA_BAN_VAO_DAY'; 
 processDriveFolder(TARGET_FOLDER_ID);
