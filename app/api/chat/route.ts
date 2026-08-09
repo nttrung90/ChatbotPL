@@ -15,7 +15,7 @@ interface ChunkData extends DocumentData {
 }
 
 interface ChatMessage {
-  role: 'user' | 'assistant'; // 🔴 Đã bỏ 'system' khỏi input của Client
+  role: 'user' | 'assistant';
   content: string;
 }
 
@@ -40,11 +40,8 @@ function getDb() {
   return getFirestore();
 }
 
-// Hàm Regex mạnh mẽ, chuẩn xác hơn
 function extractLegalReferences(text: string): string[] {
   const references = new Set<string>();
-  
-  // Bắt: Điểm a Khoản 1 Điều 2 | Khoản 2 Điều 3 | Điều 45 | Chương II | Mục 1
   const regex = /(Điểm\s+[a-zđ]+\s+Khoản\s+\d+\s+Điều\s+\d+[a-zđ]?|Khoản\s+\d+\s+Điều\s+\d+[a-zđ]?|Điều\s+\d+[a-zđ]?|Chương\s+[IVXLCDM]+|Mục\s+\d+)/gi;
   
   let match;
@@ -68,7 +65,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Dữ liệu tin nhắn không hợp lệ." }, { status: 400 });
     }
 
-    // 🔴 BẢO MẬT: Chặn Client gửi 'system' prompt
     const validRoles = ['user', 'assistant'];
     const messages: ChatMessage[] = rawMessages
       .filter((msg: any) => msg && validRoles.includes(msg.role) && typeof msg.content === 'string' && msg.content.trim() !== '')
@@ -89,57 +85,53 @@ export async function POST(req: Request) {
     const userMessage = lastMessage.content;
 
     const db = getDb();
-    if (!process.env.GROQ_API_KEY || !process.env.OPENAI_API_KEY) {
+    if (!process.env.GROQ_API_KEY || !process.env.GEMINI_API_KEY) {
       throw new Error("SERVER_CONFIG_ERROR");
     }
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
     // ==========================================
-    // 3. XỬ LÝ EMBEDDING VỚI OPENAI
+    // 3. XỬ LÝ EMBEDDING VỚI GEMINI API
     // ==========================================
     let userEmbedding: number[];
     
-    const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
+    // Gọi API của Gemini sử dụng model text-embedding-004
+    const embeddingResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${process.env.GEMINI_API_KEY}`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'text-embedding-3-small',
-        input: userMessage,
+        model: 'models/text-embedding-004',
+        content: {
+          parts: [{ text: userMessage }]
+        }
       })
     });
 
     if (!embeddingResponse.ok) {
-      throw new Error(`OpenAI_API_Error: ${embeddingResponse.status}`);
+      throw new Error(`Gemini_API_Error: ${embeddingResponse.status}`);
     }
     
     const embeddingData = await embeddingResponse.json();
     
-    if (
-      !embeddingData || 
-      !Array.isArray(embeddingData.data) || 
-      embeddingData.data.length === 0 || 
-      !Array.isArray(embeddingData.data[0].embedding)
-    ) {
-      throw new Error("Dữ liệu vector từ OpenAI bị sai cấu trúc hoặc rỗng.");
+    if (!embeddingData || !embeddingData.embedding || !Array.isArray(embeddingData.embedding.values)) {
+      throw new Error("Dữ liệu vector từ Gemini bị sai cấu trúc hoặc rỗng.");
     }
 
-    userEmbedding = embeddingData.data[0].embedding;
+    userEmbedding = embeddingData.embedding.values;
 
     // ==========================================
     // 4. TRUY VẤN RAG (Cú pháp Object & Lấy Distance)
     // ==========================================
     const chunksRef = db.collection('chunks');
     
-    // 🟠 Cú pháp Object thuần tuý cho Firestore SDK Vector Search
     const vectorQuery = chunksRef.findNearest({
       vectorField: 'embedding',
       queryVector: FieldValue.vector(userEmbedding),
       limit: 10,
       distanceMeasure: 'COSINE',
-      distanceResultField: 'distance_score' // Lấy ra điểm số khoảng cách
+      distanceResultField: 'distance_score' 
     });
     
     const snapshot = await vectorQuery.get();
@@ -151,35 +143,26 @@ export async function POST(req: Request) {
     const MAX_CONTEXT_LENGTH = 15000; 
     let currentContextLength = 0;
     
-    // Lưu trữ thông tin mapping: DocID -> [Tên file, Các Điều khoản]
     const sourceMap = new Map<string, { file: string, refs: Set<string> }>();
-    
     let docCounter = 1;
 
     if (!snapshot.empty) {
       snapshot.forEach((doc) => {
         const data = doc.data() as ChunkData & { distance_score: number };
         
-        // 🟠 Lọc chủ động (Dynamic Threshold)
-        // Cosine distance: 0 là giống nhau hoàn toàn, gần 1 là khác nhau.
-        // Bỏ qua các văn bản có khoảng cách quá lớn (không liên quan)
         if (data.distance_score !== undefined && data.distance_score > 0.45) {
-          return; // Skip chunk này
+          return; 
         }
         
-        // Tạo DocID để mã hóa (ví dụ: [Doc1])
         const docId = `[Doc${docCounter}]`;
-        
         const chunkText = `<Nguon id="${docId}">\n${data.content}\n</Nguon>\n\n`;
         
         if (currentContextLength + chunkText.length <= MAX_CONTEXT_LENGTH) {
            contextText += chunkText;
            currentContextLength += chunkText.length;
            
-           // Trích xuất Điều/Khoản
            const extractedRefs = extractLegalReferences(data.content);
            
-           // Lưu mapping để đối chiếu sau này
            if (!sourceMap.has(docId)) {
              sourceMap.set(docId, { file: data.file_name, refs: new Set(extractedRefs) });
            } else {
@@ -199,7 +182,6 @@ export async function POST(req: Request) {
     // ==========================================
     // 6. GỌI GROQ LLM (Chặn tự bịa Citation)
     // ==========================================
-    // 🟠 Ép LLM chỉ được phép dùng mã [DocX] thay vì tự sinh ra tên file
     const systemPrompt = `Bạn là một chuyên gia pháp lý AI. 
 Nhiệm vụ của bạn là trả lời câu hỏi dựa HOÀN TOÀN vào các tài liệu trong thẻ <Nguon> bên dưới.
 
@@ -219,7 +201,7 @@ ${contextText}`;
         ...messages
       ],
       model: 'llama3-70b-8192', 
-      temperature: 0.05, // Giảm sâu hơn nữa để loại bỏ hallucination
+      temperature: 0.05, 
       stream: false, 
     });
 
@@ -228,12 +210,9 @@ ${contextText}`;
     // ==========================================
     // 7. XỬ LÝ CITATION & TRẢ KẾT QUẢ CHO CLIENT
     // ==========================================
-    
-    // Lọc lại những Citation (DocID) mà LLM THỰC SỰ SỬ DỤNG trong câu trả lời
     const finalCitations = new Set<string>();
     
     sourceMap.forEach((info, docId) => {
-      // Nếu AI có nhắc đến [Doc1] trong câu trả lời
       if (aiResponse.includes(docId)) {
         if (info.refs.size > 0) {
           finalCitations.add(`${info.file} (${Array.from(info.refs).join(', ')})`);
