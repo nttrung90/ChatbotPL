@@ -25,21 +25,22 @@ const auth = new google.auth.GoogleAuth({
 });
 const drive = google.drive({ version: 'v3', auth });
 
-// Hàm gọi API tạo Embedding của OpenAI
+// Hàm gọi API tạo Embedding của Gemini
 async function getEmbedding(text) {
-  const response = await fetch('https://api.openai.com/v1/embeddings', {
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${process.env.GEMINI_API_KEY}`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: 'text-embedding-3-small',
-      input: text,
+      model: 'models/text-embedding-004',
+      content: {
+        parts: [{ text: text }]
+      }
     })
   });
   const data = await response.json();
-  return data.data[0].embedding;
+  return data.embedding.values;
 }
 
 // Hàm chia nhỏ văn bản (Chunking)
@@ -119,11 +120,9 @@ async function processDriveFolder(folderId) {
         created_at: admin.firestore.FieldValue.serverTimestamp()
       });
 
-      // Chunking và Embedding
       const chunks = chunkText(extractedText);
-      console.log(`Đã chia thành ${chunks.length} chunks. Đang tạo vector và lưu vào Firestore...`);
+      console.log(`Đã chia thành ${chunks.length} chunks. Đang tạo vector bằng Gemini và lưu vào Firestore...`);
 
-      // Sử dụng batch để lưu nhanh hơn
       let batch = db.batch();
       let batchCount = 0;
 
@@ -133,14 +132,14 @@ async function processDriveFolder(folderId) {
         const chunkRef = db.collection('chunks').doc();
         batch.set(chunkRef, {
           document_id: docRef.id,
-          file_name: file.name, // Lưu kèm tên file để dễ trích dẫn
+          file_name: file.name, 
           content: chunk,
-          embedding: FieldValue.vector(embedding), // Định dạng Vector của Firestore
+          embedding: FieldValue.vector(embedding), 
           created_at: admin.firestore.FieldValue.serverTimestamp()
         });
 
         batchCount++;
-        // Firestore batch hỗ trợ tối đa 500 thao tác một lần
+        
         if (batchCount === 450 || index === chunks.length - 1) {
           await batch.commit();
           batch = db.batch();
