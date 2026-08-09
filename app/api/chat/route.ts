@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
-import * as admin from 'firebase-admin';
-import { FieldValue } from 'firebase-admin/firestore';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import Groq from 'groq-sdk';
 
-// Khởi tạo Firebase Admin (Singleton Pattern để tránh lỗi khởi tạo nhiều lần trong Next.js)
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
+// Khởi tạo Firebase Admin an toàn cho Next.js (Singleton Pattern)
+if (!getApps().length) {
+  initializeApp({
+    credential: cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       // Xử lý ký tự xuống dòng trong private key
@@ -14,7 +14,7 @@ if (!admin.apps.length) {
     })
   });
 }
-const db = admin.firestore();
+const db = getFirestore();
 
 // Khởi tạo Groq
 const groq = new Groq({
@@ -60,7 +60,8 @@ export async function POST(req: Request) {
     let citations: string[] = [];
 
     if (!snapshot.empty) {
-      snapshot.forEach(doc => {
+      // Khai báo kiểu (doc: any) để sửa lỗi Implicit 'any' type của TypeScript
+      snapshot.forEach((doc: any) => {
         const data = doc.data();
         citations.push(data.file_name);
         contextText += `Tài liệu: ${data.file_name}\nNội dung: ${data.content}\n\n`;
