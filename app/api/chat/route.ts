@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue, DocumentData, Timestamp } from 'firebase-admin/firestore';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import Groq from 'groq-sdk';
 
 // ==========================================
@@ -49,7 +50,6 @@ function extractLegalReferences(text: string): string[] {
     const ref = match[0].trim();
     references.add(ref.charAt(0).toUpperCase() + ref.slice(1).toLowerCase());
   }
-
   return Array.from(references);
 }
 
@@ -88,44 +88,32 @@ export async function POST(req: Request) {
     if (!process.env.GROQ_API_KEY || !process.env.GEMINI_API_KEY) {
       throw new Error("SERVER_CONFIG_ERROR");
     }
+    
+    // Khởi tạo SDK
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
     // ==========================================
-    // 3. XỬ LÝ EMBEDDING VỚI GEMINI API
+    // 3. XỬ LÝ EMBEDDING VỚI GEMINI SDK
     // ==========================================
     let userEmbedding: number[];
-    
-    // Gọi API của Gemini sử dụng model text-embedding-004
-    const embeddingResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${process.env.GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'models/text-embedding-004',
-        content: {
-          parts: [{ text: userMessage }]
-        }
-      })
-    });
-
-    if (!embeddingResponse.ok) {
-      throw new Error(`Gemini_API_Error: ${embeddingResponse.status}`);
+    try {
+      const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
+      const result = await embeddingModel.embedContent(userMessage);
+      
+      if (!result || !result.embedding || !Array.isArray(result.embedding.values)) {
+        throw new Error("Dữ liệu vector rỗng.");
+      }
+      userEmbedding = result.embedding.values;
+    } catch (embeddingError: any) {
+      console.error("Gemini SDK Error:", embeddingError);
+      throw new Error(`Lỗi tạo vector: ${embeddingError.message}`);
     }
-    
-    const embeddingData = await embeddingResponse.json();
-    
-    if (!embeddingData || !embeddingData.embedding || !Array.isArray(embeddingData.embedding.values)) {
-      throw new Error("Dữ liệu vector từ Gemini bị sai cấu trúc hoặc rỗng.");
-    }
-
-    userEmbedding = embeddingData.embedding.values;
 
     // ==========================================
-    // 4. TRUY VẤN RAG (Cú pháp Object & Lấy Distance)
+    // 4. TRUY VẤN RAG BẰNG FIRESTORE FINDNEAREST
     // ==========================================
     const chunksRef = db.collection('chunks');
-    
     const vectorQuery = chunksRef.findNearest({
       vectorField: 'embedding',
       queryVector: FieldValue.vector(userEmbedding),
@@ -150,9 +138,7 @@ export async function POST(req: Request) {
       snapshot.forEach((doc) => {
         const data = doc.data() as ChunkData & { distance_score: number };
         
-        if (data.distance_score !== undefined && data.distance_score > 0.45) {
-          return; 
-        }
+        if (data.distance_score !== undefined && data.distance_score > 0.45) return; 
         
         const docId = `[Doc${docCounter}]`;
         const chunkText = `<Nguon id="${docId}">\n${data.content}\n</Nguon>\n\n`;
@@ -169,7 +155,6 @@ export async function POST(req: Request) {
              const existing = sourceMap.get(docId)!;
              extractedRefs.forEach(ref => existing.refs.add(ref));
            }
-           
            docCounter++;
         }
       });
@@ -234,7 +219,9 @@ ${contextText}`;
     if (error instanceof Error) {
       console.error("[API_CHAT_ERROR]:", error.message);
       if (error.message === "SERVER_CONFIG_ERROR") {
-        errorMessage = "Lỗi cấu hình hệ thống máy chủ.";
+        errorMessage = "Lỗi cấu hình hệ thống máy chủ (Thiếu API Key).";
+      } else if (error.message.includes("Lỗi tạo vector")) {
+        errorMessage = error.message;
       }
     } else {
       console.error("[API_CHAT_ERROR]:", error);
